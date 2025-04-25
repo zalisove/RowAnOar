@@ -5,8 +5,8 @@ using Jotunn.Entities;
 using Jotunn.Managers;
 using Jotunn.Utils;
 using System;
+using System.Collections;
 using System.Collections.Generic;
-using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
 
@@ -14,12 +14,12 @@ namespace JotunnModStub
 {
     [BepInPlugin(PluginGUID, PluginName, PluginVersion)]
     [BepInDependency(Jotunn.Main.ModGuid)]
-    //[NetworkCompatibility(CompatibilityLevel.EveryoneMustHaveMod, VersionStrictness.Minor)]
+    [NetworkCompatibility(CompatibilityLevel.EveryoneMustHaveMod, VersionStrictness.Minor)]
     internal class JotunnModStub : BaseUnityPlugin
     {
         public const string PluginGUID = "com.zalisove.rowanoar";
         public const string PluginName = "RowAnOar";
-        public const string PluginVersion = "0.0.1";
+        public const string PluginVersion = "0.0.4";
 
         // Use this class to add your own localization to the game
         // https://valheim-modding.github.io/Jotunn/tutorials/localization.html
@@ -49,22 +49,35 @@ namespace JotunnModStub
         private Text instructionText;
         private Text streakText;
 
+        // Network RPC
+        private CustomRPC RowingForceRPC;
+        private CustomRPC RowingStateRPC;
+
+        // Wait objects for coroutines
+        public static readonly WaitForSeconds OneSecondWait = new WaitForSeconds(1f);
+        public static readonly WaitForSeconds HalfSecondWait = new WaitForSeconds(0.5f);
+
         private void Awake()
         {
             // Jotunn comes with its own Logger class to provide a consistent Log style for all mods using it
             Jotunn.Logger.LogInfo("RowAnOar has landed");
 
+            ConfigurationManagerAttributes isAdminOnly = new ConfigurationManagerAttributes { IsAdminOnly = true };
+            AcceptableValueRange<float> floatRange = new AcceptableValueRange<float>(0f, 200f);
+
             // Initialize configuration
             rowingPowerMultiplier = Config.Bind("General", "RowingPowerMultiplier", 1.5f,
-                "Multiplier for ship speed when rowing is successful");
+                new ConfigDescription("Multiplier for ship speed when rowing is successful", floatRange, isAdminOnly));
             minigameSuccessSpeed = Config.Bind("General", "MinigameSuccessSpeed", 1.0f,
-                "How quickly players need to row to boost the ship");
-            activateKey = Config.Bind("Controls", "ActivateKey", KeyCode.R,
-                "Key to activate the rowing minigame");
-            rowingKey = Config.Bind("Controls", "RowingKey", KeyCode.Space,
-                "Key to press during the rowing minigame");
+                new ConfigDescription("How quickly players need to row to boost the ship", floatRange, isAdminOnly));
+
             shipDetectionRadius = Config.Bind("General", "ShipDetectionRadius", 5f,
-                "Radius to check if player is still on the ship when interacting with objects");
+                new ConfigDescription("Radius to check if player is still on the ship when interacting with objects",
+                floatRange, isAdminOnly));
+
+
+            activateKey = Config.Bind("Controls", "ActivateKey", KeyCode.R, "Key to activate the rowing minigame");
+            rowingKey = Config.Bind("Controls", "RowingKey", KeyCode.Space,"Key to press during the rowing minigame");
 
             // Register event callbacks
             PrefabManager.OnVanillaPrefabsAvailable += AddRowingToShips;
@@ -72,8 +85,119 @@ namespace JotunnModStub
             // Initialize UI
             GUIManager.OnCustomGUIAvailable += SetupRowingUI;
 
+            // Setup networking RPCs
+            RowingForceRPC = NetworkManager.Instance.AddRPC("RowingForceRPC", RowingForceServerReceive, RowingForceClientReceive);
+            RowingStateRPC = NetworkManager.Instance.AddRPC("RowingStateRPC", RowingStateServerReceive, RowingStateClientReceive);
+
+            Jotunn.Logger.LogInfo("Rowing network RPCs registered");
             // Apply patches via Harmony
             harmony.PatchAll();
+        }
+
+
+        // Server receives rowing force data and broadcasts to all clients
+        private IEnumerator RowingForceServerReceive(long sender, ZPackage package)
+        {
+            // Read data from package
+            ZDOID shipZDOID = package.ReadZDOID();
+            Vector3 forceDirection = package.ReadVector3();
+            float forceAmount = package.ReadSingle();
+            
+            // Broadcast to all clients (including the sender for consistency)
+            ZPackage broadcastPackage = new ZPackage();
+            broadcastPackage.Write(shipZDOID);
+            broadcastPackage.Write(forceDirection);
+            broadcastPackage.Write(forceAmount);
+            
+            RowingForceRPC.SendPackage(ZNet.instance.m_peers, broadcastPackage);
+
+
+            GameObject obj = ZNetScene.instance.FindInstance(shipZDOID);
+            if (obj != null)
+            {
+                // Find the ship with matching ZDOID
+                ZNetView view = obj.GetComponent<ZNetView>();
+                if (view != null)
+                {
+                    Ship ship = view.GetComponent<Ship>();
+                    if (ship != null)
+                    {
+                        // Apply force to the ship
+                        ship.m_body.AddForce(forceDirection * forceAmount, ForceMode.Force);
+                    }
+                }
+            }
+
+            yield return null;
+        }
+
+        // Client receives rowing force data from server
+        private IEnumerator RowingForceClientReceive(long sender, ZPackage package)
+        {
+            // Read data from package
+            ZDOID shipZDOID = package.ReadZDOID();
+            Vector3 forceDirection = package.ReadVector3();
+            float forceAmount = package.ReadSingle();
+            
+            GameObject obj = ZNetScene.instance.FindInstance(shipZDOID);
+            if (obj != null)
+            {
+                // Find the ship with matching ZDOID
+                ZNetView view = obj.GetComponent<ZNetView>();
+                if (view != null)
+                {
+                    Ship ship = view.GetComponent<Ship>();
+                    if (ship != null)
+                    {
+                        // Apply force to the ship
+                        ship.m_body.AddForce(forceDirection * forceAmount, ForceMode.Force);
+                    }
+                }
+            }
+            
+            yield return null;
+        }
+
+        // Server receives rowing state changes and broadcasts to all clients
+        private IEnumerator RowingStateServerReceive(long sender, ZPackage package)
+        {
+            // Forward the package to all clients
+            RowingStateRPC.SendPackage(ZNet.instance.m_peers, new ZPackage(package.GetArray()));
+            yield return null;
+        }
+
+        // Client receives rowing state changes from server
+        private IEnumerator RowingStateClientReceive(long sender, ZPackage package)
+        {
+            long playerID = package.ReadLong();
+            ZDOID shipZDOID = package.ReadZDOID();
+            bool isRowing = package.ReadBool();
+            
+            if (playerID != ZNet.instance.m_characterID.UserID)
+            {
+                GameObject obj = ZNetScene.instance.FindInstance(shipZDOID);
+                if (obj != null)
+                {
+                    ZNetView view = obj.GetComponent<ZNetView>();
+
+                    if (view != null)
+                    {
+                        Ship ship = view.GetComponent<Ship>();
+                        if (ship != null)
+                        {
+                            ShipRowingManager rowingManager = ship.GetComponent<ShipRowingManager>();
+                            if (rowingManager != null)
+                            {
+                                // Update remote player's rowing state
+                                rowingManager.UpdateRemotePlayerRowingState(playerID, isRowing);
+                            }
+                        }
+                    }
+                }
+
+            }
+            
+            yield return null;
         }
 
         private void SetupRowingUI()
@@ -108,7 +232,7 @@ namespace JotunnModStub
                 addContentSizeFitter: false
             );
 
-            // Create progress bar background (need to create a panel differently since CreatePanel isn't a method)
+            // Create progress bar background
             GameObject progressBarBgGO = new GameObject("ProgressBarBg", typeof(RectTransform), typeof(Image));
             progressBarBgGO.transform.SetParent(rowingUI.transform, false);
 
@@ -201,7 +325,6 @@ namespace JotunnModStub
             if (!shipObject.GetComponent<ShipRowingManager>())
             {
                 shipObject.AddComponent<ShipRowingManager>();
-                Jotunn.Logger.LogInfo($"Added rowing capability to ship: {shipObject.name}");
             }
         }
 
@@ -209,7 +332,7 @@ namespace JotunnModStub
         private bool IsPlayerControllingShip(Player player, Ship ship)
         {
             if (player == null || ship == null) return false;
-
+            
             // In Valheim, the player controls the ship when they interact with the rudder/steering
             return false;
         }
@@ -265,10 +388,8 @@ namespace JotunnModStub
                 }
             }
             
-
             if (closestShip != null)
             {
-                Jotunn.Logger.LogInfo($"Found nearby ship at distance: {closestDist}m");
                 return closestShip;
             }
 
@@ -279,6 +400,42 @@ namespace JotunnModStub
         private bool IsPlayerSeated(Player player)
         {
             return player != null && player.IsAttached();
+        }
+
+        // Send force to network
+        public void SendRowingForceToNetwork(Ship ship, Vector3 direction, float force)
+        {
+            if (ship == null) return;
+            
+            ZNetView shipView = ship.GetComponent<ZNetView>();
+            if (shipView == null) return;
+            
+            // Pack the data
+            ZPackage pkg = new ZPackage();
+            pkg.Write(shipView.GetZDO().m_uid);
+            pkg.Write(direction);
+            pkg.Write(force);
+            
+            // Send to server
+            RowingForceRPC.SendPackage(ZRoutedRpc.instance.GetServerPeerID(), pkg);
+        }
+
+        // Send player rowing state to network
+        public void SendRowingStateToNetwork(Player player, Ship ship, bool isRowing)
+        {
+            if (player == null || ship == null) return;
+            
+            ZNetView shipView = ship.GetComponent<ZNetView>();
+            if (shipView == null) return;
+            
+            // Pack the data
+            ZPackage pkg = new ZPackage();
+            pkg.Write(player.GetPlayerID());
+            pkg.Write(shipView.GetZDO().m_uid);
+            pkg.Write(isRowing);
+            
+            // Send to server
+            RowingStateRPC.SendPackage(ZRoutedRpc.instance.GetServerPeerID(),pkg);
         }
 
         // Update method that gets called every frame
@@ -314,19 +471,15 @@ namespace JotunnModStub
                     {
                         if (isControlling)
                         {
-                            Jotunn.Logger.LogInfo("Player is now steering the ship");
                             MessageHud.instance.ShowMessage(MessageHud.MessageType.Center, "You are steering the ship");
                         }
                         else
                         {
-                            Jotunn.Logger.LogInfo("Player is now a passenger on the ship");
                             MessageHud.instance.ShowMessage(MessageHud.MessageType.Center, $"You are a passenger. Take a seat and press {activateKey.Value} to help row!");
                         }
                     }
                     else if (lastShip != null)
                     {
-                        Jotunn.Logger.LogInfo("Player left the ship");
-
                         // Make sure to stop rowing and hide UI if player leaves ship
                         if (lastShip.GetComponent<ShipRowingManager>() != null)
                         {
@@ -346,8 +499,6 @@ namespace JotunnModStub
                 // Check for activate key press when on ship as passenger
                 if (Input.GetKeyDown(activateKey.Value) && currentShip != null && !isControlling)
                 {
-
-
                     if (isSeated)
                     {
                         // Player is seated on a ship and not steering it, start/stop rowing
@@ -371,8 +522,10 @@ namespace JotunnModStub
                 if (rowingManager.IsPlayerRowing(player))
                 {
                     rowingManager.StopRowing(player);
-                    Jotunn.Logger.LogInfo("Player stopped rowing");
                     MessageHud.instance.ShowMessage(MessageHud.MessageType.Center, "Stopped rowing");
+
+                    // Send network update
+                    SendRowingStateToNetwork(player, ship, false);
 
                     // Hide UI
                     if (rowingUI != null)
@@ -383,8 +536,10 @@ namespace JotunnModStub
                 else
                 {
                     rowingManager.StartRowing(player);
-                    Jotunn.Logger.LogInfo("Player started rowing");
                     MessageHud.instance.ShowMessage(MessageHud.MessageType.Center, $"Started rowing! Press {rowingKey.Value} when the markers align!");
+                    
+                    // Send network update
+                    SendRowingStateToNetwork(player, ship, true);
 
                     // Show UI
                     if (rowingUI != null)
@@ -418,6 +573,7 @@ namespace JotunnModStub
         {
             private Ship ship;
             private Dictionary<Player, RowingMinigame> rowingPlayers = new Dictionary<Player, RowingMinigame>();
+            private HashSet<long> remoteRowingPlayers = new HashSet<long>();
 
             private void Awake()
             {
@@ -446,6 +602,20 @@ namespace JotunnModStub
                 }
             }
 
+            public void UpdateRemotePlayerRowingState(long playerID, bool isRowing)
+            {
+                if (isRowing)
+                {
+                    remoteRowingPlayers.Add(playerID);
+                    Jotunn.Logger.LogInfo($"Remote player {playerID} is now rowing");
+                }
+                else
+                {
+                    remoteRowingPlayers.Remove(playerID);
+                    Jotunn.Logger.LogInfo($"Remote player {playerID} stopped rowing");
+                }
+            }
+
             private void Update()
             {
                 // Check if any rowing players are no longer on the ship
@@ -467,12 +637,16 @@ namespace JotunnModStub
                     if (!isOnShip || player.IsDead() || isControlling || !isSeated)
                     {
                         playersToRemove.Add(player);
-                        Jotunn.Logger.LogInfo($"Removing player from rowing (not on this ship: {!isOnShip}, dead: {player.IsDead()}, steering: {isControlling}, not seated: {!isSeated})");
-
-                        // Hide UI if this is the local player
-                        if (player == Player.m_localPlayer && mainPlugin.rowingUI != null)
+                        // Send network update if this is the local player
+                        if (player == Player.m_localPlayer)
                         {
-                            mainPlugin.rowingUI.SetActive(false);
+                            mainPlugin.SendRowingStateToNetwork(player, ship, false);
+                            
+                            // Hide UI
+                            if (mainPlugin.rowingUI != null)
+                            {
+                                mainPlugin.rowingUI.SetActive(false);
+                            }
                         }
 
                         continue;
@@ -482,18 +656,21 @@ namespace JotunnModStub
                     float rowingForce = minigame.Update();
                     if (rowingForce > 0)
                     {
-                        // Apply additional force to the ship in its forward direction
-
-                        if(ship.GetSpeedSetting() == Ship.Speed.Back)
+                        // Determine direction based on ship's speed setting
+                        Vector3 forceDirection = ship.GetSpeedSetting() == Ship.Speed.Back 
+                            ? -ship.transform.forward 
+                            : ship.transform.forward;
+                        
+                        // Only apply forces for local player
+                        if (player == Player.m_localPlayer)
                         {
-                            ship.m_body.AddForce(-ship.transform.forward * rowingForce, ForceMode.Force);
+                            // Send the force to the network instead of applying directly
+                            mainPlugin.SendRowingForceToNetwork(ship, forceDirection, rowingForce);
+                            
+                            // Still apply force locally for instant feedback
+                            ship.m_body.AddForce(forceDirection * rowingForce, ForceMode.Force);
                         }
-                        else
-                        {
-                            ship.m_body.AddForce(ship.transform.forward * rowingForce, ForceMode.Force);
-                        }
-
-                    } 
+                    }
                 }
 
                 // Remove players who are no longer on the ship
@@ -542,8 +719,6 @@ namespace JotunnModStub
 
                 // Get configured speed
                 speed = mainPlugin.minigameSuccessSpeed.Value;
-
-                Jotunn.Logger.LogInfo($"Initialized rowing minigame with target: {targetPosition:F2}, speed: {speed:F2}");
             }
 
             // Returns the force to apply to the ship
@@ -577,8 +752,6 @@ namespace JotunnModStub
                     // Check if player hit the target
                     float distance = Math.Abs(currentPosition - targetPosition);
 
-                    Jotunn.Logger.LogInfo($"Player pressed {rowKey}! Current: {currentPosition:F2}, Target: {targetPosition:F2}, Distance: {distance:F2}");
-
                     if (distance < TARGET_WINDOW)
                     {
                         // Success!
@@ -586,7 +759,6 @@ namespace JotunnModStub
                         successTimer = SUCCESS_DURATION;
                         successStreak++;
 
-                        Jotunn.Logger.LogInfo($"Rowing success! Streak: {successStreak}");
                         MessageHud.instance.ShowMessage(MessageHud.MessageType.Center, $"Good rowing! Streak: {successStreak}");
 
                         // Move target position for next attempt
@@ -598,7 +770,6 @@ namespace JotunnModStub
                         isSuccess = false;
                         successStreak = 0;
 
-                        Jotunn.Logger.LogInfo("Rowing failed! Missed the target.");
                         MessageHud.instance.ShowMessage(MessageHud.MessageType.Center, "Missed! Try again.");
                     }
                 }
