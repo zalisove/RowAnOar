@@ -28,20 +28,12 @@ namespace RowAnOar
         private ConfigEntry<float> minigameSuccessSpeed;
         private ConfigEntry<KeyCode> activateKey;
         private ConfigEntry<KeyCode> rowingKey;
-        private ConfigEntry<float> shipDetectionRadius;
 
         private Ship lastShip = null;
         private bool wasControllingLastFrame = false;
         private Vector3 lastPosition = Vector3.zero;
-        private float lastShipCheckTime = 0f;
-        private const float SHIP_CHECK_INTERVAL = 0.5f;
         private const float NETWORK_UPDATE_INTERVAL = 0.1f;
         private float lastNetworkUpdateTime = 0f;
-
-        // Кешовані списки та об'єкти
-        private readonly List<Ship> cachedShips = new List<Ship>();
-        private readonly Dictionary<GameObject, Ship> cachedShipComponents = new Dictionary<GameObject, Ship>();
-        private readonly Dictionary<GameObject, ZNetView> cachedZNetViews = new Dictionary<GameObject, ZNetView>();
 
         private GameObject rowingUI;
         private RectTransform progressBarBg;
@@ -73,9 +65,6 @@ namespace RowAnOar
                 new ConfigDescription("Multiplier for ship speed when rowing is successful", new AcceptableValueRange<float>(0f, 2000f), isAdminOnly));
             minigameSuccessSpeed = Config.Bind("General", "MinigameSuccessSpeed", 1.0f,
                 new ConfigDescription("How quickly players need to row to boost the ship", new AcceptableValueRange<float>(0f, 1.5f), isAdminOnly));
-            shipDetectionRadius = Config.Bind("General", "ShipDetectionRadius", 5f,
-                new ConfigDescription("Radius to check if player is still on the ship when interacting with objects",
-                new AcceptableValueRange<float>(1f, 10f), isAdminOnly));
             activateKey = Config.Bind("Controls", "ActivateKey", KeyCode.B, "Key to activate the rowing minigame");
             rowingKey = Config.Bind("Controls", "RowingKey", KeyCode.N, "Key to press during the rowing minigame");
 
@@ -86,31 +75,6 @@ namespace RowAnOar
             RowingStateRPC = NetworkManager.Instance.AddRPC("RowingStateRPC", RowingStateServerReceive, RowingStateClientReceive);
 
             harmony.PatchAll();
-        }
-
-        private void Start()
-        {
-            // Ініціалізуємо кешований список кораблів при старті
-            RefreshCachedShips();
-
-            // Запускаємо корутину для періодичного оновлення кешу кораблів
-            StartCoroutine(UpdateCachedShipsRoutine());
-        }
-
-        private IEnumerator UpdateCachedShipsRoutine()
-        {
-            while (true)
-            {
-                yield return OneSecondWait;
-                RefreshCachedShips();
-            }
-        }
-
-        private void RefreshCachedShips()
-        {
-            cachedShips.Clear();
-            var ships = GameObject.FindObjectsOfType<Ship>();
-            cachedShips.AddRange(ships);
         }
 
         private IEnumerator RowingForceServerReceive(long sender, ZPackage package)
@@ -129,10 +93,10 @@ namespace RowAnOar
             GameObject obj = ZNetScene.instance.FindInstance(shipZDOID);
             if (obj != null)
             {
-                ZNetView view = GetCachedZNetView(obj);
+                ZNetView view = obj.GetComponent<ZNetView>();
                 if (view != null)
                 {
-                    Ship ship = GetCachedShip(obj);
+                    Ship ship = obj.GetComponent<Ship>();
                     if (ship != null)
                     {
                         ship.m_body.AddForce(forceDirection * forceAmount, ForceMode.Force);
@@ -152,10 +116,10 @@ namespace RowAnOar
             GameObject obj = ZNetScene.instance.FindInstance(shipZDOID);
             if (obj != null)
             {
-                ZNetView view = GetCachedZNetView(obj);
+                ZNetView view = obj.GetComponent<ZNetView>();
                 if (view != null)
                 {
-                    Ship ship = GetCachedShip(obj);
+                    Ship ship = obj.GetComponent<Ship>();
                     if (ship != null)
                     {
                         ship.m_body.AddForce(forceDirection * forceAmount, ForceMode.Force);
@@ -183,7 +147,7 @@ namespace RowAnOar
                 GameObject obj = ZNetScene.instance.FindInstance(shipZDOID);
                 if (obj != null)
                 {
-                    ZNetView view = GetCachedZNetView(obj);
+                    ZNetView view = obj.GetComponent<ZNetView>();
                     Ship ship = view?.GetComponent<Ship>();
                     if (ship != null)
                     {
@@ -304,9 +268,6 @@ namespace RowAnOar
                 }
             }
             PrefabManager.OnVanillaPrefabsAvailable -= AddRowingToShips;
-
-            // Оновлюємо кеш кораблів після додавання компонентів
-            RefreshCachedShips();
         }
 
         private bool IsPlayerControllingShip(Player player, Ship ship) => false;
@@ -315,70 +276,9 @@ namespace RowAnOar
         {
             if (player == null) return null;
 
-            // Використовуємо прямий метод, який є найшвидшим
-            Ship directShip = player.GetStandingOnShip();
-            if (directShip != null) return directShip;
-
-            // Використовуємо кешований корабель, якщо час перевірки не минув
-            if (lastShip != null && Time.time - lastShipCheckTime < SHIP_CHECK_INTERVAL)
-                return lastShip;
-
-            lastShipCheckTime = Time.time;
-            float checkRadius = shipDetectionRadius.Value;
-
-            // Першочергово перевіряємо останній відомий корабель
-            if (lastShip != null && Vector3.Distance(player.transform.position, lastShip.transform.position) < checkRadius)
-                return lastShip;
-
-            // Використовуємо кешований список кораблів замість пошуку щоразу
-            Ship closestShip = null;
-            float closestDist = checkRadius;
-
-            int shipCount = cachedShips.Count;
-            for (int i = 0; i < shipCount; i++)
-            {
-                Ship ship = cachedShips[i];
-                if (ship == null) continue;
-
-                float dist = Vector3.Distance(player.transform.position, ship.transform.position);
-                if (dist < closestDist)
-                {
-                    closestShip = ship;
-                    closestDist = dist;
-                }
-            }
-
-            return closestShip;
-        }
-
-        private Ship GetCachedShip(GameObject obj)
-        {
-            if (obj == null) return null;
-
-            Ship ship;
-            if (cachedShipComponents.TryGetValue(obj, out ship))
-                return ship;
-
-            ship = obj.GetComponent<Ship>();
-            if (ship != null)
-                cachedShipComponents[obj] = ship;
-
+            // Використовуємо прямий доступ до корабля через LastGroundBody
+            Ship ship = player.m_lastGroundBody?.GetComponent<Ship>();
             return ship;
-        }
-
-        private ZNetView GetCachedZNetView(GameObject obj)
-        {
-            if (obj == null) return null;
-
-            ZNetView view;
-            if (cachedZNetViews.TryGetValue(obj, out view))
-                return view;
-
-            view = obj.GetComponent<ZNetView>();
-            if (view != null)
-                cachedZNetViews[obj] = view;
-
-            return view;
         }
 
         private bool IsPlayerSeated(Player player) => player != null && player.IsAttached();
@@ -405,7 +305,7 @@ namespace RowAnOar
         {
             if (player == null || ship == null) return;
 
-            ZNetView shipView = GetCachedZNetView(ship.gameObject);
+            ZNetView shipView = ship.GetComponent<ZNetView>();
             if (shipView == null) return;
 
             ZPackage pkg = new ZPackage();
@@ -435,7 +335,6 @@ namespace RowAnOar
                     MessageHud.instance.ShowMessage(MessageHud.MessageType.Center, "Stopped rowing: you need to be seated");
                 }
             }
-
 
             float playerMovement = 0f;
             if (lastPosition != Vector3.zero)
@@ -529,9 +428,6 @@ namespace RowAnOar
             private const float PHYSICS_UPDATE_INTERVAL = 0.05f;
             private float lastPhysicsUpdateTime = 0f;
 
-            // Кешування напрямку руху
-            private Vector3 cachedForceDirection = Vector3.forward;
-
             private void Awake() => ship = GetComponent<Ship>();
 
             public bool IsPlayerRowing(Player player) => rowingPlayers.ContainsKey(player);
@@ -558,7 +454,7 @@ namespace RowAnOar
 
             private Vector3 GetForceDirection()
             {
-                return ship.GetSpeedSetting() == Ship.Speed.Back ? -ship.transform.forward: ship.transform.forward;
+                return ship.GetSpeedSetting() == Ship.Speed.Back ? -ship.transform.forward : ship.transform.forward;
             }
 
             private void Update()
@@ -636,9 +532,6 @@ namespace RowAnOar
             // Для оптимізації мережевого коду
             private float lastRowingActionTime = 0f;
             private const float ROWING_ACTION_COOLDOWN = 0.2f;
-
-            // Для кешування напрямку сили
-            private Vector3 cachedDirection = Vector3.zero;
 
             public RowingMinigame(Player player, Ship ship)
             {
