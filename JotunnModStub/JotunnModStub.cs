@@ -19,7 +19,7 @@ namespace JotunnModStub
     {
         public const string PluginGUID = "com.zalisove.rowanoar";
         public const string PluginName = "RowAnOar";
-        public const string PluginVersion = "0.0.4";
+        public const string PluginVersion = "0.0.6";
 
         public static CustomLocalization Localization = LocalizationManager.Instance.GetLocalization();
         private readonly Harmony harmony = new Harmony(PluginGUID);
@@ -35,6 +35,13 @@ namespace JotunnModStub
         private Vector3 lastPosition = Vector3.zero;
         private float lastShipCheckTime = 0f;
         private const float SHIP_CHECK_INTERVAL = 0.5f;
+        private const float NETWORK_UPDATE_INTERVAL = 0.1f;
+        private float lastNetworkUpdateTime = 0f;
+
+        // Кешовані списки та об'єкти
+        private readonly List<Ship> cachedShips = new List<Ship>();
+        private readonly Dictionary<GameObject, Ship> cachedShipComponents = new Dictionary<GameObject, Ship>();
+        private readonly Dictionary<GameObject, ZNetView> cachedZNetViews = new Dictionary<GameObject, ZNetView>();
 
         private GameObject rowingUI;
         private RectTransform progressBarBg;
@@ -43,11 +50,17 @@ namespace JotunnModStub
         private Text instructionText;
         private Text streakText;
 
+        // Кешування значень для UI
+        private float lastUICurrentPosition = -1f;
+        private float lastUITargetPosition = -1f;
+        private int lastUIStreak = -1;
+
         private CustomRPC RowingForceRPC;
         private CustomRPC RowingStateRPC;
 
         public static readonly WaitForSeconds OneSecondWait = new WaitForSeconds(1f);
         public static readonly WaitForSeconds HalfSecondWait = new WaitForSeconds(0.5f);
+        public static readonly WaitForSeconds NetworkWait = new WaitForSeconds(NETWORK_UPDATE_INTERVAL);
 
         private void Awake()
         {
@@ -57,14 +70,14 @@ namespace JotunnModStub
             AcceptableValueRange<float> floatRange = new AcceptableValueRange<float>(0f, 200f);
 
             rowingPowerMultiplier = Config.Bind("General", "RowingPowerMultiplier", 1.5f,
-                new ConfigDescription("Multiplier for ship speed when rowing is successful", floatRange, isAdminOnly));
+                new ConfigDescription("Multiplier for ship speed when rowing is successful", new AcceptableValueRange<float>(0f, 2000f), isAdminOnly));
             minigameSuccessSpeed = Config.Bind("General", "MinigameSuccessSpeed", 1.0f,
-                new ConfigDescription("How quickly players need to row to boost the ship", floatRange, isAdminOnly));
+                new ConfigDescription("How quickly players need to row to boost the ship", new AcceptableValueRange<float>(0f, 1.5f), isAdminOnly));
             shipDetectionRadius = Config.Bind("General", "ShipDetectionRadius", 5f,
                 new ConfigDescription("Radius to check if player is still on the ship when interacting with objects",
-                floatRange, isAdminOnly));
-            activateKey = Config.Bind("Controls", "ActivateKey", KeyCode.R, "Key to activate the rowing minigame");
-            rowingKey = Config.Bind("Controls", "RowingKey", KeyCode.Space, "Key to press during the rowing minigame");
+                new AcceptableValueRange<float>(1f, 10f), isAdminOnly));
+            activateKey = Config.Bind("Controls", "ActivateKey", KeyCode.B, "Key to activate the rowing minigame");
+            rowingKey = Config.Bind("Controls", "RowingKey", KeyCode.N, "Key to press during the rowing minigame");
 
             PrefabManager.OnVanillaPrefabsAvailable += AddRowingToShips;
             GUIManager.OnCustomGUIAvailable += SetupRowingUI;
@@ -73,6 +86,31 @@ namespace JotunnModStub
             RowingStateRPC = NetworkManager.Instance.AddRPC("RowingStateRPC", RowingStateServerReceive, RowingStateClientReceive);
 
             harmony.PatchAll();
+        }
+
+        private void Start()
+        {
+            // Ініціалізуємо кешований список кораблів при старті
+            RefreshCachedShips();
+
+            // Запускаємо корутину для періодичного оновлення кешу кораблів
+            StartCoroutine(UpdateCachedShipsRoutine());
+        }
+
+        private IEnumerator UpdateCachedShipsRoutine()
+        {
+            while (true)
+            {
+                yield return OneSecondWait;
+                RefreshCachedShips();
+            }
+        }
+
+        private void RefreshCachedShips()
+        {
+            cachedShips.Clear();
+            var ships = GameObject.FindObjectsOfType<Ship>();
+            cachedShips.AddRange(ships);
         }
 
         private IEnumerator RowingForceServerReceive(long sender, ZPackage package)
@@ -91,10 +129,10 @@ namespace JotunnModStub
             GameObject obj = ZNetScene.instance.FindInstance(shipZDOID);
             if (obj != null)
             {
-                ZNetView view = obj.GetComponent<ZNetView>();
+                ZNetView view = GetCachedZNetView(obj);
                 if (view != null)
                 {
-                    Ship ship = view.GetComponent<Ship>();
+                    Ship ship = GetCachedShip(obj);
                     if (ship != null)
                     {
                         ship.m_body.AddForce(forceDirection * forceAmount, ForceMode.Force);
@@ -114,10 +152,10 @@ namespace JotunnModStub
             GameObject obj = ZNetScene.instance.FindInstance(shipZDOID);
             if (obj != null)
             {
-                ZNetView view = obj.GetComponent<ZNetView>();
+                ZNetView view = GetCachedZNetView(obj);
                 if (view != null)
                 {
-                    Ship ship = view.GetComponent<Ship>();
+                    Ship ship = GetCachedShip(obj);
                     if (ship != null)
                     {
                         ship.m_body.AddForce(forceDirection * forceAmount, ForceMode.Force);
@@ -145,7 +183,8 @@ namespace JotunnModStub
                 GameObject obj = ZNetScene.instance.FindInstance(shipZDOID);
                 if (obj != null)
                 {
-                    Ship ship = obj.GetComponent<ZNetView>()?.GetComponent<Ship>();
+                    ZNetView view = GetCachedZNetView(obj);
+                    Ship ship = view?.GetComponent<Ship>();
                     if (ship != null)
                     {
                         ship.GetComponent<ShipRowingManager>()?.UpdateRemotePlayerRowingState(playerID, isRowing);
@@ -247,6 +286,11 @@ namespace JotunnModStub
                 addContentSizeFitter: false
             );
             streakText = streakTextGO.GetComponent<Text>();
+
+            // Ініціалізація кешованих значень UI
+            lastUICurrentPosition = 0f;
+            lastUITargetPosition = 0f;
+            lastUIStreak = 0;
         }
 
         private void AddRowingToShips()
@@ -260,6 +304,9 @@ namespace JotunnModStub
                 }
             }
             PrefabManager.OnVanillaPrefabsAvailable -= AddRowingToShips;
+
+            // Оновлюємо кеш кораблів після додавання компонентів
+            RefreshCachedShips();
         }
 
         private bool IsPlayerControllingShip(Player player, Ship ship) => false;
@@ -268,24 +315,31 @@ namespace JotunnModStub
         {
             if (player == null) return null;
 
+            // Використовуємо прямий метод, який є найшвидшим
             Ship directShip = player.GetStandingOnShip();
             if (directShip != null) return directShip;
 
+            // Використовуємо кешований корабель, якщо час перевірки не минув
             if (lastShip != null && Time.time - lastShipCheckTime < SHIP_CHECK_INTERVAL)
                 return lastShip;
 
             lastShipCheckTime = Time.time;
             float checkRadius = shipDetectionRadius.Value;
 
+            // Першочергово перевіряємо останній відомий корабель
             if (lastShip != null && Vector3.Distance(player.transform.position, lastShip.transform.position) < checkRadius)
                 return lastShip;
 
-            var allShips = GameObject.FindObjectsOfType<Ship>();
+            // Використовуємо кешований список кораблів замість пошуку щоразу
             Ship closestShip = null;
             float closestDist = checkRadius;
 
-            foreach (var ship in allShips)
+            int shipCount = cachedShips.Count;
+            for (int i = 0; i < shipCount; i++)
             {
+                Ship ship = cachedShips[i];
+                if (ship == null) continue;
+
                 float dist = Vector3.Distance(player.transform.position, ship.transform.position);
                 if (dist < closestDist)
                 {
@@ -297,10 +351,45 @@ namespace JotunnModStub
             return closestShip;
         }
 
+        private Ship GetCachedShip(GameObject obj)
+        {
+            if (obj == null) return null;
+
+            Ship ship;
+            if (cachedShipComponents.TryGetValue(obj, out ship))
+                return ship;
+
+            ship = obj.GetComponent<Ship>();
+            if (ship != null)
+                cachedShipComponents[obj] = ship;
+
+            return ship;
+        }
+
+        private ZNetView GetCachedZNetView(GameObject obj)
+        {
+            if (obj == null) return null;
+
+            ZNetView view;
+            if (cachedZNetViews.TryGetValue(obj, out view))
+                return view;
+
+            view = obj.GetComponent<ZNetView>();
+            if (view != null)
+                cachedZNetViews[obj] = view;
+
+            return view;
+        }
+
         private bool IsPlayerSeated(Player player) => player != null && player.IsAttached();
 
         public void SendRowingForceToNetwork(Ship ship, Vector3 direction, float force)
         {
+            if (Time.time - lastNetworkUpdateTime < NETWORK_UPDATE_INTERVAL)
+                return;
+
+            lastNetworkUpdateTime = Time.time;
+
             ZNetView shipView = ship?.GetComponent<ZNetView>();
             if (shipView == null) return;
 
@@ -316,7 +405,7 @@ namespace JotunnModStub
         {
             if (player == null || ship == null) return;
 
-            ZNetView shipView = ship.GetComponent<ZNetView>();
+            ZNetView shipView = GetCachedZNetView(ship.gameObject);
             if (shipView == null) return;
 
             ZPackage pkg = new ZPackage();
@@ -335,6 +424,18 @@ namespace JotunnModStub
             Ship currentShip = GetPlayerShip(localPlayer);
             bool isControlling = currentShip != null && IsPlayerControllingShip(localPlayer, currentShip);
             bool isSeated = IsPlayerSeated(localPlayer);
+
+            if (rowingUI != null && rowingUI.activeSelf && !isSeated)
+            {
+                rowingUI.SetActive(false);
+                if (currentShip != null)
+                {
+                    currentShip.GetComponent<ShipRowingManager>()?.StopRowing(localPlayer);
+                    SendRowingStateToNetwork(localPlayer, currentShip, false);
+                    MessageHud.instance.ShowMessage(MessageHud.MessageType.Center, "Stopped rowing: you need to be seated");
+                }
+            }
+
 
             float playerMovement = 0f;
             if (lastPosition != Vector3.zero)
@@ -397,6 +498,19 @@ namespace JotunnModStub
         {
             if (rowingUI == null || !rowingUI.activeSelf) return;
 
+            // Перевірка чи потрібно оновлювати UI
+            bool needsUpdate =
+                Math.Abs(lastUICurrentPosition - currentPosition) > 0.01f ||
+                Math.Abs(lastUITargetPosition - targetPosition) > 0.01f ||
+                lastUIStreak != streak;
+
+            if (!needsUpdate) return;
+
+            // Оновлення кешованих значень
+            lastUICurrentPosition = currentPosition;
+            lastUITargetPosition = targetPosition;
+            lastUIStreak = streak;
+
             float barWidth = progressBarBg.rect.width;
             progressBarCurrent.anchoredPosition = new Vector2((currentPosition * barWidth), 0);
             progressBarTarget.anchoredPosition = new Vector2((targetPosition * barWidth), 0);
@@ -407,8 +521,16 @@ namespace JotunnModStub
         public class ShipRowingManager : MonoBehaviour
         {
             private Ship ship;
-            private Dictionary<Player, RowingMinigame> rowingPlayers = new Dictionary<Player, RowingMinigame>();
-            private HashSet<long> remoteRowingPlayers = new HashSet<long>();
+            private readonly Dictionary<Player, RowingMinigame> rowingPlayers = new Dictionary<Player, RowingMinigame>(8);
+            private readonly HashSet<long> remoteRowingPlayers = new HashSet<long>();
+            private readonly List<Player> playersToRemove = new List<Player>(8);
+
+            // Для оптимізації фізики
+            private const float PHYSICS_UPDATE_INTERVAL = 0.05f;
+            private float lastPhysicsUpdateTime = 0f;
+
+            // Кешування напрямку руху
+            private Vector3 cachedForceDirection = Vector3.forward;
 
             private void Awake() => ship = GetComponent<Ship>();
 
@@ -434,10 +556,21 @@ namespace JotunnModStub
                     remoteRowingPlayers.Remove(playerID);
             }
 
+            private Vector3 GetForceDirection()
+            {
+                return ship.GetSpeedSetting() == Ship.Speed.Back ? -ship.transform.forward: ship.transform.forward;
+            }
+
             private void Update()
             {
-                List<Player> playersToRemove = new List<Player>();
+                if (rowingPlayers.Count == 0) return;
+
+                playersToRemove.Clear();
                 JotunnModStub mainPlugin = BepInEx.Bootstrap.Chainloader.PluginInfos[JotunnModStub.PluginGUID].Instance as JotunnModStub;
+
+                bool isPhysicsUpdate = Time.time - lastPhysicsUpdateTime >= PHYSICS_UPDATE_INTERVAL;
+                if (isPhysicsUpdate)
+                    lastPhysicsUpdateTime = Time.time;
 
                 foreach (var kv in rowingPlayers)
                 {
@@ -462,11 +595,9 @@ namespace JotunnModStub
                     }
 
                     float rowingForce = minigame.Update();
-                    if (rowingForce > 0)
+                    if (rowingForce > 0 && isPhysicsUpdate)
                     {
-                        Vector3 forceDirection = ship.GetSpeedSetting() == Ship.Speed.Back
-                            ? -ship.transform.forward
-                            : ship.transform.forward;
+                        Vector3 forceDirection = GetForceDirection();
 
                         if (player == Player.m_localPlayer)
                         {
@@ -497,8 +628,17 @@ namespace JotunnModStub
             private const float MAX_POSITION = 1f;
             private const float MIN_POSITION = 0f;
             private const float SUCCESS_DURATION = 1f;
+            private const float UI_UPDATE_FREQUENCY = 0.05f;
+            private float lastUIUpdateTime = 0f;
 
             private JotunnModStub mainPlugin;
+
+            // Для оптимізації мережевого коду
+            private float lastRowingActionTime = 0f;
+            private const float ROWING_ACTION_COOLDOWN = 0.2f;
+
+            // Для кешування напрямку сили
+            private Vector3 cachedDirection = Vector3.zero;
 
             public RowingMinigame(Player player, Ship ship)
             {
@@ -507,7 +647,9 @@ namespace JotunnModStub
                 targetPosition = UnityEngine.Random.Range(0.3f, 0.7f);
                 currentPosition = 0f;
                 mainPlugin = BepInEx.Bootstrap.Chainloader.PluginInfos[JotunnModStub.PluginGUID].Instance as JotunnModStub;
-                speed = mainPlugin.minigameSuccessSpeed.Value;
+                speed = mainPlugin.minigameSuccessSpeed.Value + (successStreak * 0.01f);
+                lastUIUpdateTime = Time.time;
+                lastRowingActionTime = 0f;
             }
 
             public float Update()
@@ -526,11 +668,15 @@ namespace JotunnModStub
                 }
 
                 if (player == Player.m_localPlayer)
+                {
+                    lastUIUpdateTime = Time.time;
                     mainPlugin.UpdateRowingUI(currentPosition, targetPosition, successStreak);
+                }
 
                 KeyCode rowKey = mainPlugin.rowingKey.Value;
-                if (Input.GetKeyDown(rowKey) && player == Player.m_localPlayer)
+                if (Input.GetKeyDown(rowKey) && player == Player.m_localPlayer && Time.time - lastRowingActionTime >= ROWING_ACTION_COOLDOWN)
                 {
+                    lastRowingActionTime = Time.time;
                     float distance = Math.Abs(currentPosition - targetPosition);
 
                     if (distance < TARGET_WINDOW)
