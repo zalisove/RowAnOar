@@ -10,12 +10,12 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
 
-namespace JotunnModStub
+namespace RowAnOar
 {
     [BepInPlugin(PluginGUID, PluginName, PluginVersion)]
     [BepInDependency(Jotunn.Main.ModGuid)]
     [NetworkCompatibility(CompatibilityLevel.EveryoneMustHaveMod, VersionStrictness.Minor)]
-    internal class JotunnModStub : BaseUnityPlugin
+    internal class RowAnOar : BaseUnityPlugin
     {
         public const string PluginGUID = "com.zalisove.rowanoar";
         public const string PluginName = "RowAnOar";
@@ -566,7 +566,7 @@ namespace JotunnModStub
                 if (rowingPlayers.Count == 0) return;
 
                 playersToRemove.Clear();
-                JotunnModStub mainPlugin = BepInEx.Bootstrap.Chainloader.PluginInfos[JotunnModStub.PluginGUID].Instance as JotunnModStub;
+                RowAnOar mainPlugin = BepInEx.Bootstrap.Chainloader.PluginInfos[RowAnOar.PluginGUID].Instance as RowAnOar;
 
                 bool isPhysicsUpdate = Time.time - lastPhysicsUpdateTime >= PHYSICS_UPDATE_INTERVAL;
                 if (isPhysicsUpdate)
@@ -631,7 +631,7 @@ namespace JotunnModStub
             private const float UI_UPDATE_FREQUENCY = 0.05f;
             private float lastUIUpdateTime = 0f;
 
-            private JotunnModStub mainPlugin;
+            private RowAnOar mainPlugin;
 
             // Для оптимізації мережевого коду
             private float lastRowingActionTime = 0f;
@@ -646,7 +646,7 @@ namespace JotunnModStub
                 this.ship = ship;
                 targetPosition = UnityEngine.Random.Range(0.3f, 0.7f);
                 currentPosition = 0f;
-                mainPlugin = BepInEx.Bootstrap.Chainloader.PluginInfos[JotunnModStub.PluginGUID].Instance as JotunnModStub;
+                mainPlugin = BepInEx.Bootstrap.Chainloader.PluginInfos[RowAnOar.PluginGUID].Instance as RowAnOar;
                 speed = mainPlugin.minigameSuccessSpeed.Value + (successStreak * 0.01f);
                 lastUIUpdateTime = Time.time;
                 lastRowingActionTime = 0f;

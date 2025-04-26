@@ -1,6 +1,6 @@
 #!/bin/bash
 
-DLL=JotunnModStub/bin/Debug/net48/JotunnModStub.dll
+DLL=RowAnOar/bin/Debug/net48/RowAnOar.dll
 PLUGINS=/home/$USER/.local/share/Steam/steamapps/common/Valheim/BepInEx/plugins
 
 # Check that source files exist and are readable
